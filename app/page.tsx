@@ -2,7 +2,20 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-type HistoryItem = {
+/* =========================
+   TYPES
+========================= */
+
+type Thread = {
+  pk: string;
+  sk: string;
+  threadId: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ThreadMessageItem = {
   pk: string;
   sk: string;
   createdAt: string;
@@ -20,111 +33,178 @@ type ChatMsg = {
   latencyMs?: number | null;
 };
 
+/* =========================
+   COMPONENT
+========================= */
+
 export default function Home() {
-  /* prompt input */
+  /* ---------- THREAD SIDEBAR STATE ---------- */
+
+  const [threads, setThreads] = useState<Thread[]>([]);
+  const [threadsLoading, setThreadsLoading] = useState(false);
+  const [activeThreadId, setActiveThreadId] = useState("");
+
+  /* ---------- MESSAGES ---------- */
+
+  const [items, setItems] = useState<ThreadMessageItem[]>([]);
+  const [messagesLoading, setMessagesLoading] = useState(false);
+
+  /* ---------- INPUT / STREAM ---------- */
+
   const [prompt, setPrompt] = useState("");
-
-  /* current streaming response text (not yet saved until finished) */
   const [response, setResponse] = useState("");
+  const [pendingPrompt, setPendingPrompt] = useState("");
 
-  /* loading state */
+  /* ---------- UI STATES ---------- */
+
   const [loading, setLoading] = useState(false);
-
-  /* error state */
-  const [error, setError] = useState("");
-
-  /* history items from Dynamo (prompt/response pairs) */
-  const [history, setHistory] = useState<HistoryItem[]>([]);
-
-  /* loading state for history */
-  const [historyLoading, setHistoryLoading] = useState(false);
-
-  /* AbortController for Stop button */
   const [controller, setController] = useState<AbortController | null>(null);
-
-  /* shows the user bubble immediately while we stream + save */
-  const [pendingPrompt, setPendingPrompt] = useState<string>("");
-
-  /* optional: lets us show a small note when user stops generation */
+  const [error, setError] = useState("");
   const [stopped, setStopped] = useState(false);
 
-  /* used to auto-scroll to the newest message */
+  /* scroll anchor */
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  /* load history from Dynamo */
-  async function loadHistory() {
-    setHistoryLoading(true);
+  /* =========================
+     LOAD THREAD LIST
+  ========================= */
+  async function loadThreads() {
+    setThreadsLoading(true);
     try {
-      const res = await fetch("/api/history", { method: "GET" });
+      const res = await fetch("/api/threads");
       const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Failed to load history");
-      setHistory(Array.isArray(data.items) ? data.items : []);
+
+      if (!res.ok) throw new Error(data?.error || "Failed to load threads");
+
+      setThreads(Array.isArray(data.threads) ? data.threads : []);
     } catch (err) {
-      console.error("LOAD HISTORY ERROR:", err);
+      console.error("THREAD LOAD ERROR:", err);
     }
-    setHistoryLoading(false);
+    setThreadsLoading(false);
   }
 
+  /* =========================
+     CREATE NEW THREAD
+  ========================= */
+  async function createThreadAndSelect() {
+    const res = await fetch("/api/threads", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.error);
+
+    const t: Thread = data.thread;
+
+    /* optimistic UI update */
+    setThreads((prev) => [t, ...prev]);
+
+    setActiveThreadId(t.threadId);
+    setItems([]);
+    setResponse("");
+    setPendingPrompt("");
+    setStopped(false);
+  }
+
+  /* =========================
+     LOAD THREAD MESSAGES
+  ========================= */
+  async function loadMessages(threadId: string) {
+    if (!threadId) return;
+
+    setMessagesLoading(true);
+
+    try {
+      const res = await fetch(`/api/threads/${threadId}/messages`);
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data?.error);
+
+      setItems(Array.isArray(data.messages) ? data.messages : []);
+    } catch (err) {
+      console.error("MESSAGE LOAD ERROR:", err);
+    }
+
+    setMessagesLoading(false);
+  }
+
+  /* load threads on first render */
   useEffect(() => {
-    loadHistory();
+    loadThreads();
   }, []);
 
-  /* build chat messages from history so we can render ChatGPT-style bubbles */
-  const chatMessages: ChatMsg[] = useMemo(() => {
-    // history from API is newest first (ScanIndexForward: false),
-    // but chat UI should be oldest -> newest
-    const ordered = [...history].reverse();
+  /* select first thread or create one */
+  useEffect(() => {
+    if (threadsLoading) return;
 
+    if (!activeThreadId) {
+      if (threads.length > 0) {
+        setActiveThreadId(threads[0].threadId);
+      } else {
+        createThreadAndSelect();
+      }
+    }
+  }, [threadsLoading, threads.length]);
+
+  /* load messages when thread changes */
+  useEffect(() => {
+    if (activeThreadId) loadMessages(activeThreadId);
+  }, [activeThreadId]);
+
+  /* =========================
+     BUILD CHAT BUBBLES
+  ========================= */
+  const chatMessages: ChatMsg[] = useMemo(() => {
     const msgs: ChatMsg[] = [];
 
-    for (const h of ordered) {
+    for (const m of items) {
       msgs.push({
-        id: `${h.sk}-user`,
+        id: `${m.sk}-user`,
         role: "user",
-        text: h.prompt,
-        createdAt: h.createdAt
+        text: m.prompt,
+        createdAt: m.createdAt
       });
 
       msgs.push({
-        id: `${h.sk}-assistant`,
+        id: `${m.sk}-assistant`,
         role: "assistant",
-        text: h.response,
-        createdAt: h.createdAt,
-        latencyMs: h.latencyMs ?? null
+        text: m.response,
+        createdAt: m.createdAt,
+        latencyMs: m.latencyMs ?? null
       });
     }
 
     return msgs;
-  }, [history]);
+  }, [items]);
 
-  /* auto-scroll when messages change or streaming text updates */
+  /* auto-scroll */
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chatMessages.length, response, loading, pendingPrompt, stopped]);
+  }, [chatMessages.length, response, pendingPrompt, loading]);
 
-  /* submit -> show user bubble -> stream -> save -> refresh */
+  /* =========================
+     SEND MESSAGE
+  ========================= */
   async function handleSubmit() {
+    if (!activeThreadId) return;
+
     if (!prompt.trim()) {
       setError("Please enter a prompt.");
       return;
     }
 
-    const promptToSend = prompt; // keep a stable copy
+    const promptToSend = prompt;
 
-    /* show user's message immediately (ChatGPT behavior) */
+    /* show user bubble immediately */
     setPendingPrompt(promptToSend);
 
+    setPrompt("");
     setLoading(true);
     setError("");
     setResponse("");
     setStopped(false);
-    setPrompt(""); // clears input immediately
 
     const ctrl = new AbortController();
     setController(ctrl);
 
     try {
-      /* call AI route (streaming) */
       const aiRes = await fetch("/api/ai", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -134,29 +214,27 @@ export default function Home() {
 
       if (!aiRes.ok) {
         const msg = await aiRes.text();
-        throw new Error(msg || "AI request failed");
+        throw new Error(msg);
       }
 
       const reader = aiRes.body?.getReader();
       if (!reader) throw new Error("No stream returned");
 
       const decoder = new TextDecoder();
-
       let fullText = "";
       const start = Date.now();
 
-      /* stream tokens into UI */
+      /* stream response */
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
 
-        const chunk = decoder.decode(value);
-        fullText += chunk;
+        fullText += decoder.decode(value);
         setResponse(fullText);
       }
 
-      /* save full prompt + response after stream completes */
-      const historyRes = await fetch("/api/history", {
+      /* save message */
+      await fetch(`/api/threads/${activeThreadId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -167,21 +245,15 @@ export default function Home() {
         })
       });
 
-      const historyData = await historyRes.json();
+      /* refresh UI */
+      await loadMessages(activeThreadId);
+      await loadThreads();
 
-      if (!historyRes.ok) {
-        console.error("HISTORY SAVE ERROR:", historyData);
-      } else {
-        await loadHistory();
-
-        /* once it’s saved and now part of history, remove temp bubble */
-        setPendingPrompt("");
-      }
-
+      setPendingPrompt("");
       setResponse("");
+
     } catch (err: any) {
       if (err?.name === "AbortError") {
-        /* user hit Stop — keep the user bubble, keep partial response */
         setStopped(true);
       } else {
         setError(err?.message || "Something went wrong");
@@ -192,147 +264,167 @@ export default function Home() {
     setLoading(false);
   }
 
-  /* clear Dynamo history (chat) */
-  async function handleClearHistory() {
-    try {
-      await fetch("/api/history", { method: "DELETE" });
-      await loadHistory();
-      setResponse("");
-      setPendingPrompt("");
-      setStopped(false);
-      setError("");
-    } catch (err) {
-      console.error("CLEAR HISTORY ERROR:", err);
+  /* =========================
+     NEW CHAT
+  ========================= */
+  async function handleNewChat() {
+    await createThreadAndSelect();
+    await loadThreads();
+  }
+
+  /* =========================
+     DELETE THREAD
+  ========================= */
+  async function handleDeleteThread(threadId: string) {
+    await fetch(`/api/threads/${threadId}`, { method: "DELETE" });
+    await loadThreads();
+
+    if (threadId === activeThreadId) {
+      const remaining = threads.filter((t) => t.threadId !== threadId);
+      if (remaining.length > 0)
+        setActiveThreadId(remaining[0].threadId);
+      else
+        await createThreadAndSelect();
     }
   }
 
-  return (
-    <main className="min-h-screen bg-gray-100">
-      {/* Chat container */}
-      <div className="mx-auto max-w-3xl h-screen flex flex-col">
-        {/* Header */}
-        <div className="p-4 flex items-center justify-between">
-          <h1 className="text-xl font-bold">AI Chat</h1>
+  const activeTitle =
+    threads.find((t) => t.threadId === activeThreadId)?.title || "AI Chat";
 
-          <button
-            onClick={handleClearHistory}
-            className="text-sm underline"
-            type="button"
-          >
-            Clear chat
+  /* =========================
+     UI
+  ========================= */
+
+  return (
+    <main className="h-screen flex bg-gray-100">
+
+      {/* Sidebar */}
+      <aside className="w-72 bg-white border-r hidden md:flex flex-col">
+
+        <div className="p-4 flex justify-between">
+          <h2 className="font-bold">Chats</h2>
+          <button onClick={handleNewChat} className="border px-3 py-1 rounded">
+            + New
           </button>
         </div>
 
-        {/* Messages area (scrollable) */}
-        <div className="flex-1 overflow-y-auto px-4 pb-28 mask-gradient">
-          {historyLoading ? (
-            <p className="text-sm text-gray-500">Loading chat...</p>
-          ) : chatMessages.length === 0 && !loading && !pendingPrompt ? (
-            <div className="mt-10 text-center text-gray-500">
-              <p className="text-lg font-medium">Start a conversation</p>
-              <p className="text-sm">Ask anything and your chat will be saved.</p>
-            </div>
-          ) : (
-            <div className="space-y-3 pb-10 pt-10">
-              {/* saved chat bubbles from Dynamo */}
-              {chatMessages.map((m) => (
-                <div
-                  key={m.id}
-                  className={`flex ${
-                    m.role === "user" ? "justify-end" : "justify-start"
-                  }`}
+        <div className="px-2">
+        {threads.map((t) => {
+          const active = t.threadId === activeThreadId;
+
+          return (
+            <div
+              key={`${t.pk}-${t.sk}`} // guaranteed unique key
+              onClick={() => setActiveThreadId(t.threadId)}
+              className={`p-2 rounded-lg cursor-pointer flex justify-between ${
+                active ? "bg-gray-100" : "hover:bg-gray-50"
+              }`}
+            >
+                <div className="truncate text-sm">{t.title}</div>
+
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDeleteThread(t.threadId);
+                  }}
+                  className="text-red-500 text-xs"
                 >
-                  <div
-                    className={`max-w-[85%] rounded-2xl px-4 py-3 shadow-sm whitespace-pre-wrap ${
-                      m.role === "user"
-                        ? "bg-black text-white"
-                        : "bg-white text-gray-900"
-                    }`}
-                  >
-                    {m.text}
-                    {m.role === "assistant" && m.latencyMs ? (
-                      <div className="mt-2 text-xs opacity-60">
-                        {m.latencyMs}ms
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              ))}
+                  ✕
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </aside>
 
-              {/* show user's message immediately (before Dynamo refresh) */}
-              {pendingPrompt && (
-                <div className="flex justify-end">
-                  <div className="max-w-[85%] rounded-2xl px-4 py-3 shadow-sm bg-black text-white whitespace-pre-wrap">
-                    {pendingPrompt}
-                  </div>
-                </div>
-              )}
+      {/* Main Chat */}
+      <section className="flex-1 flex flex-col">
 
-              {/* streaming assistant bubble appears right after user bubble */}
-              {(loading || response) && (
-                <div className="flex justify-start">
-                  <div className="max-w-[85%] rounded-2xl px-4 py-3 shadow-sm bg-white text-gray-900 whitespace-pre-wrap">
-                    {response || "Thinking..."}
-                    {stopped && (
-                      <div className="mt-2 text-xs text-gray-500">
-                        Stopped
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
+        {/* Header */}
+        <div className="p-4 border-b bg-white font-bold">
+          {activeTitle}
+        </div>
 
-              {/* any error */}
-              {error && (
-                <div className="flex justify-start">
-                  <div className="max-w-[85%] rounded-2xl px-4 py-3 bg-red-50 text-red-700 border border-red-200">
-                    {error}
-                  </div>
-                </div>
-              )}
+        {/* Messages */}
+        <div className="flex-1 overflow-y-auto px-4 py-6 space-y-3">
 
-              <div ref={bottomRef} />
+          {chatMessages.map((m) => (
+            <div
+              key={m.id}
+              className={`flex ${
+                m.role === "user" ? "justify-end" : "justify-start"
+              }`}
+            >
+              <div
+                className={`px-4 py-3 rounded-2xl max-w-[80%] whitespace-pre-wrap ${
+                  m.role === "user"
+                    ? "bg-black text-white"
+                    : "bg-white shadow"
+                }`}
+              >
+                {m.text}
+              </div>
+            </div>
+          ))}
+
+          {/* pending user bubble */}
+          {pendingPrompt && (
+            <div className="flex justify-end">
+              <div className="bg-black text-white px-4 py-3 rounded-2xl">
+                {pendingPrompt}
+              </div>
             </div>
           )}
-        </div>
 
-        {/* Input area (fixed at bottom) */}
-        <div className="fixed bottom-0 left-0 right-0 bg-gray-100 border-t">
-          <div className="mx-auto max-w-3xl p-4">
-            <div className="bg-white rounded-2xl shadow-md p-3 flex gap-2 items-end">
-              <textarea
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                placeholder="Message..."
-                className="flex-1 border rounded-xl p-3 resize-none h-14 focus:outline-none"
-              />
-
-              <button
-                onClick={handleSubmit}
-                disabled={loading}
-                className="bg-black text-white px-4 py-3 rounded-xl disabled:opacity-50"
-                type="button"
-              >
-                {loading ? "..." : "Send"}
-              </button>
-
-              {loading && controller && (
-                <button
-                  onClick={() => controller.abort()}
-                  className="border border-red-500 text-red-500 px-4 py-3 rounded-xl"
-                  type="button"
-                >
-                  Stop
-                </button>
-              )}
+          {/* streaming bubble */}
+          {(loading || response) && (
+            <div className="flex justify-start">
+              <div className="bg-white shadow px-4 py-3 rounded-2xl">
+                {response || "Thinking..."}
+                {stopped && (
+                  <div className="text-xs text-gray-400 mt-2">
+                    Stopped
+                  </div>
+                )}
+              </div>
             </div>
+          )}
 
-            <p className="mt-2 text-xs text-gray-500">
-              Tip: Your chats are saved to DynamoDB automatically.
-            </p>
-          </div>
+          {error && (
+            <div className="text-red-500 text-sm">{error}</div>
+          )}
+
+          <div ref={bottomRef} />
         </div>
-      </div>
+
+        {/* Input */}
+        <div className="border-t p-4 bg-white flex gap-2">
+
+          <textarea
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            className="flex-1 border rounded-lg p-2"
+            placeholder="Message..."
+          />
+
+          <button
+            onClick={handleSubmit}
+            disabled={loading}
+            className="bg-black text-white px-4 rounded"
+          >
+            Send
+          </button>
+
+          {loading && controller && (
+            <button
+              onClick={() => controller.abort()}
+              className="border border-red-500 text-red-500 px-4 rounded"
+            >
+              Stop
+            </button>
+          )}
+        </div>
+      </section>
     </main>
   );
 }

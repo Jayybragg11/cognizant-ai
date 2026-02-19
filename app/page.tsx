@@ -39,24 +39,20 @@ type ChatMsg = {
 
 export default function Home() {
   /* ---------- THREAD SIDEBAR STATE ---------- */
-
   const [threads, setThreads] = useState<Thread[]>([]);
   const [threadsLoading, setThreadsLoading] = useState(false);
   const [activeThreadId, setActiveThreadId] = useState("");
 
   /* ---------- MESSAGES ---------- */
-
   const [items, setItems] = useState<ThreadMessageItem[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
 
   /* ---------- INPUT / STREAM ---------- */
-
   const [prompt, setPrompt] = useState("");
   const [response, setResponse] = useState("");
   const [pendingPrompt, setPendingPrompt] = useState("");
 
   /* ---------- UI STATES ---------- */
-
   const [loading, setLoading] = useState(false);
   const [controller, setController] = useState<AbortController | null>(null);
   const [error, setError] = useState("");
@@ -101,6 +97,7 @@ export default function Home() {
     setResponse("");
     setPendingPrompt("");
     setStopped(false);
+    setError("");
   }
 
   /* =========================
@@ -115,14 +112,41 @@ export default function Home() {
       const res = await fetch(`/api/threads/${threadId}/messages`);
       const data = await res.json();
 
-      if (!res.ok) throw new Error(data?.error);
+      if (!res.ok) throw new Error(data?.error || "Failed to load messages");
 
       setItems(Array.isArray(data.messages) ? data.messages : []);
-    } catch (err) {
+    } catch (err: any) {
       console.error("MESSAGE LOAD ERROR:", err);
+      setError(err?.message || "Failed to load messages");
     }
 
     setMessagesLoading(false);
+  }
+
+  /* =========================
+     SELECT THREAD (CLEAN SWITCH)
+     - Stops streaming
+     - Clears temporary UI state
+     - Loads messages for clicked thread
+  ========================= */
+  async function handleSelectThread(threadId: string) {
+    // If a stream is running, stop it before switching chats
+    controller?.abort();
+    setController(null);
+
+    // Clear "in-flight" UI so it doesn't bleed into the next thread
+    setLoading(false);
+    setStopped(false);
+    setError("");
+    setResponse("");
+    setPendingPrompt("");
+
+    // Switch thread + clear existing messages immediately (feels snappy)
+    setActiveThreadId(threadId);
+    setItems([]);
+
+    // Load selected thread messages now (no need to wait for useEffect)
+    await loadMessages(threadId);
   }
 
   /* load threads on first render */
@@ -143,9 +167,10 @@ export default function Home() {
     }
   }, [threadsLoading, threads.length]);
 
-  /* load messages when thread changes */
+  /* load messages when thread changes (safety net) */
   useEffect(() => {
     if (activeThreadId) loadMessages(activeThreadId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeThreadId]);
 
   /* =========================
@@ -214,7 +239,7 @@ export default function Home() {
 
       if (!aiRes.ok) {
         const msg = await aiRes.text();
-        throw new Error(msg);
+        throw new Error(msg || "AI request failed");
       }
 
       const reader = aiRes.body?.getReader();
@@ -234,7 +259,7 @@ export default function Home() {
       }
 
       /* save message */
-      await fetch(`/api/threads/${activeThreadId}/messages`, {
+      const saveRes = await fetch(`/api/threads/${activeThreadId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -245,15 +270,18 @@ export default function Home() {
         })
       });
 
+      const saveData = await saveRes.json();
+      if (!saveRes.ok) throw new Error(saveData?.error || "Failed to save message");
+
       /* refresh UI */
       await loadMessages(activeThreadId);
       await loadThreads();
 
       setPendingPrompt("");
       setResponse("");
-
     } catch (err: any) {
       if (err?.name === "AbortError") {
+        // user clicked Stop: keep bubbles visible
         setStopped(true);
       } else {
         setError(err?.message || "Something went wrong");
@@ -281,10 +309,8 @@ export default function Home() {
 
     if (threadId === activeThreadId) {
       const remaining = threads.filter((t) => t.threadId !== threadId);
-      if (remaining.length > 0)
-        setActiveThreadId(remaining[0].threadId);
-      else
-        await createThreadAndSelect();
+      if (remaining.length > 0) setActiveThreadId(remaining[0].threadId);
+      else await createThreadAndSelect();
     }
   }
 
@@ -296,135 +322,211 @@ export default function Home() {
   ========================= */
 
   return (
-    <main className="h-screen flex bg-gray-100">
+    <main className="h-screen flex bg-[var(--cog-bg)] text-[var(--cog-text)]">
+      <div className="h-screen flex w-full">
+        {/* Sidebar */}
+        <aside className="w-80 bg-[var(--cog-surface)] border-r border-[var(--cog-border)] hidden md:flex flex-col">
+          {/* Sidebar header */}
+          <div className="p-4 flex items-center justify-between border-[var(--cog-border)]">
+            <h2 className="font-semibold tracking-tight">Chats</h2>
 
-      {/* Sidebar */}
-      <aside className="w-72 bg-white border-r hidden md:flex flex-col">
-
-        <div className="p-4 flex justify-between">
-          <h2 className="font-bold">Chats</h2>
-          <button onClick={handleNewChat} className="border px-3 py-1 rounded">
-            + New
-          </button>
-        </div>
-
-        <div className="px-2">
-        {threads.map((t) => {
-          const active = t.threadId === activeThreadId;
-
-          return (
-            <div
-              key={`${t.pk}-${t.sk}`} // guaranteed unique key
-              onClick={() => setActiveThreadId(t.threadId)}
-              className={`p-2 rounded-lg cursor-pointer flex justify-between ${
-                active ? "bg-gray-100" : "hover:bg-gray-50"
-              }`}
+            <button
+              onClick={handleNewChat}
+              className="text-sm px-3 py-1.5 rounded-lg border border-[var(--cog-border)] bg-white hover:bg-[var(--cog-bg)]"
+              type="button"
             >
-                <div className="truncate text-sm">{t.title}</div>
+              + New
+            </button>
+          </div>
 
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleDeleteThread(t.threadId);
-                  }}
-                  className="text-red-500 text-xs"
-                >
-                  ✕
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      </aside>
+          {/* Thread list */}
+          <div className="px-2 pb-3 overflow-y-auto">
+            {threadsLoading ? (
+              <p className="text-sm text-[var(--cog-muted)] px-2 py-2">
+                Loading…
+              </p>
+            ) : threads.length === 0 ? (
+              <p className="text-sm text-[var(--cog-muted)] px-2 py-2">
+                No chats yet.
+              </p>
+            ) : (
+              <ul className="space-y-1">
+                {threads.map((t) => {
+                  const active = t.threadId === activeThreadId;
 
-      {/* Main Chat */}
-      <section className="flex-1 flex flex-col">
+                  return (
+                    <li key={`${t.pk}-${t.sk}`}>
+                      <div
+                        onClick={() => handleSelectThread(t.threadId)}
+                        className={`flex items-center justify-between gap-2 rounded-xl px-3 py-2 cursor-pointer border ${
+                          active
+                            ? "bg-[var(--cog-bg)] border-[var(--cog-border)]"
+                            : "bg-transparent border-transparent hover:bg-[var(--cog-bg)] hover:border-[var(--cog-border)]"
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium truncate">
+                            {t.title || "New chat"}
+                          </p>
+                          <p className="text-xs text-[var(--cog-muted)] truncate">
+                            {new Date(t.updatedAt || t.createdAt).toLocaleString()}
+                          </p>
+                        </div>
 
-        {/* Header */}
-        <div className="p-4 border-b bg-white font-bold">
-          {activeTitle}
-        </div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteThread(t.threadId);
+                          }}
+                          className="text-xs text-[var(--cog-muted)] hover:text-red-600"
+                          type="button"
+                          aria-label="Delete chat"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </aside>
 
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto px-4 py-6 space-y-3">
+        {/* Main Chat */}
+        <section className="flex-1 flex flex-col">
+          {/* Header */}
+          <div className="p-4 flex items-center justify-between border-b border-[var(--cog-border)] bg-[var(--cog-surface)]">
+            <h1 className="text-lg font-semibold tracking-tight">
+              {activeTitle}
+            </h1>
 
-          {chatMessages.map((m) => (
-            <div
-              key={m.id}
-              className={`flex ${
-                m.role === "user" ? "justify-end" : "justify-start"
-              }`}
+            <button
+              onClick={handleNewChat}
+              className="md:hidden text-sm px-3 py-1.5 rounded-lg border border-[var(--cog-border)] bg-white hover:bg-[var(--cog-bg)]"
+              type="button"
             >
-              <div
-                className={`px-4 py-3 rounded-2xl max-w-[80%] whitespace-pre-wrap ${
-                  m.role === "user"
-                    ? "bg-black text-white"
-                    : "bg-white shadow"
-                }`}
-              >
-                {m.text}
-              </div>
-            </div>
-          ))}
+              + New
+            </button>
+          </div>
 
-          {/* pending user bubble */}
-          {pendingPrompt && (
-            <div className="flex justify-end">
-              <div className="bg-black text-white px-4 py-3 rounded-2xl">
-                {pendingPrompt}
+          {/* Messages */}
+          <div className="flex-1 overflow-y-auto px-4 pb-28">
+            {messagesLoading ? (
+              <p className="text-sm text-[var(--cog-muted)] py-4">
+                Loading chat…
+              </p>
+            ) : chatMessages.length === 0 && !loading && !pendingPrompt ? (
+              <div className="mt-10 text-center text-[var(--cog-muted)]">
+                <p className="text-lg font-medium text-[var(--cog-text)]">
+                  Start a conversation
+                </p>
+                <p className="text-sm">This chat is saved by thread.</p>
               </div>
-            </div>
-          )}
+            ) : (
+              <div className="space-y-3 pb-10 pt-6">
+                {/* Saved messages */}
+                {chatMessages.map((m) => (
+                  <div
+                    key={m.id}
+                    className={`flex ${
+                      m.role === "user" ? "justify-end" : "justify-start"
+                    }`}
+                  >
+                    <div
+                      className={`max-w-[85%] rounded-2xl px-4 py-3 whitespace-pre-wrap ${
+                        m.role === "user"
+                          ? "bg-[var(--cog-navy)] text-white shadow-sm"
+                          : "bg-[var(--cog-surface)] text-[var(--cog-text)] border border-[var(--cog-border)] shadow-sm"
+                      }`}
+                    >
+                      {m.text}
 
-          {/* streaming bubble */}
-          {(loading || response) && (
-            <div className="flex justify-start">
-              <div className="bg-white shadow px-4 py-3 rounded-2xl">
-                {response || "Thinking..."}
-                {stopped && (
-                  <div className="text-xs text-gray-400 mt-2">
-                    Stopped
+                      {/* Tiny perf/latency footer (optional) */}
+                      {m.role === "assistant" && m.latencyMs ? (
+                        <div className="mt-2 text-xs text-[var(--cog-muted)]">
+                          {m.latencyMs}ms
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                ))}
+
+                {/* Pending user bubble (shows instantly) */}
+                {pendingPrompt && (
+                  <div className="flex justify-end">
+                    <div className="max-w-[85%] rounded-2xl px-4 py-3 bg-[var(--cog-navy)] text-white shadow-sm whitespace-pre-wrap">
+                      {pendingPrompt}
+                    </div>
                   </div>
                 )}
+
+                {/* Streaming assistant bubble */}
+                {(loading || response) && (
+                  <div className="flex justify-start">
+                    <div className="max-w-[85%] rounded-2xl px-4 py-3 bg-[var(--cog-surface)] text-[var(--cog-text)] border border-[var(--cog-border)] shadow-sm whitespace-pre-wrap">
+                      {response || "Thinking..."}
+                      {stopped && (
+                        <div className="mt-2 text-xs text-[var(--cog-muted)]">
+                          Stopped
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Error bubble */}
+                {error && (
+                  <div className="flex justify-start">
+                    <div className="max-w-[85%] rounded-2xl px-4 py-3 bg-red-50 text-red-700 border border-red-200">
+                      {error}
+                    </div>
+                  </div>
+                )}
+
+                <div ref={bottomRef} />
               </div>
+            )}
+          </div>
+
+          {/* Input (fixed) */}
+          <div className="fixed bottom-0 left-0 right-0 bg-[var(--cog-surface)] border-t border-[var(--cog-border)]">
+            <div className="mx-auto max-w-4xl p-4">
+              <div className="bg-white rounded-2xl border border-[var(--cog-border)] shadow-sm p-3 flex gap-2 items-end">
+                <textarea
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  placeholder="Message..."
+                  className="flex-1 border border-[var(--cog-border)] rounded-xl p-3 resize-none h-14 focus:outline-none focus:ring-2 focus:ring-[var(--cog-cyan)]"
+                />
+
+                <button
+                  onClick={handleSubmit}
+                  disabled={loading}
+                  className="px-4 py-3 rounded-xl text-white bg-[var(--cog-navy)] hover:opacity-95 disabled:opacity-50"
+                  type="button"
+                >
+                  {loading ? "..." : "Send"}
+                </button>
+
+                {loading && controller && (
+                  <button
+                    onClick={() => controller.abort()}
+                    className="px-4 py-3 rounded-xl border border-[var(--cog-border)] text-[var(--cog-muted)] hover:text-red-600"
+                    type="button"
+                  >
+                    Stop
+                  </button>
+                )}
+              </div>
+
+              <p className="mt-2 text-xs text-[var(--cog-muted)]">
+                Tip: Chats are saved per thread in DynamoDB.
+              </p>
             </div>
-          )}
-
-          {error && (
-            <div className="text-red-500 text-sm">{error}</div>
-          )}
-
-          <div ref={bottomRef} />
-        </div>
-
-        {/* Input */}
-        <div className="border-t p-4 bg-white flex gap-2">
-
-          <textarea
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            className="flex-1 border rounded-lg p-2"
-            placeholder="Message..."
-          />
-
-          <button
-            onClick={handleSubmit}
-            disabled={loading}
-            className="bg-black text-white px-4 rounded"
-          >
-            Send
-          </button>
-
-          {loading && controller && (
-            <button
-              onClick={() => controller.abort()}
-              className="border border-red-500 text-red-500 px-4 rounded"
-            >
-              Stop
-            </button>
-          )}
-        </div>
-      </section>
+          </div>
+        </section>
+      </div>
     </main>
   );
 }

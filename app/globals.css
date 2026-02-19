@@ -1,9 +1,22 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --cog-navy: #000048;  
+  --cog-teal: #1e728c;   
+  --cog-cyan: #36c0cf;   
+
+  --cog-bg: #f6f8fb;    
+  --cog-surface: #ffffff; 
+  --cog-border: #e6eaf0; 
+  --cog-text: #0b1220;   
+  --cog-muted: #5b677a;  
 }
+
+body {
+  background: var(--cog-bg);
+  color: var(--cog-text);
+}
+
 
 @theme inline {
   --color-background: var(--background);

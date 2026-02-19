@@ -72,19 +72,40 @@ export async function POST(
 
     /* update sidebar thread metadata */
     await ddb.send(
-      new UpdateCommand({
-        TableName: AI_HISTORY_TABLE,
-        Key: {
-          pk: `USER#${USER_ID}`,
-          sk: `THREAD#${threadId}`
-        },
-        UpdateExpression: "SET updatedAt = :u, title = if_not_exists(title, :t)",
-        ExpressionAttributeValues: {
-          ":u": now,
-          ":t": (prompt || "New chat").slice(0, 32)
-        }
-      })
-    );
+        new UpdateCommand({
+          TableName: AI_HISTORY_TABLE,
+          Key: {
+            pk: `USER#${USER_ID}`,
+            sk: `THREAD#${threadId}`
+          },
+          UpdateExpression:
+            "SET updatedAt = :u, title = if_not_exists(title, :tDefault)",
+          ExpressionAttributeValues: {
+            ":u": now,
+            ":tDefault": "New chat"
+          }
+        })
+      );
+      
+      /* If title is still the default, replace it with first prompt */
+      await ddb.send(
+        new UpdateCommand({
+          TableName: AI_HISTORY_TABLE,
+          Key: {
+            pk: `USER#${USER_ID}`,
+            sk: `THREAD#${threadId}`
+          },
+          UpdateExpression: "SET title = :t",
+          ConditionExpression: "title = :defaultTitle",
+          ExpressionAttributeValues: {
+            ":t": (prompt || "New chat").slice(0, 32),
+            ":defaultTitle": "New chat"
+          }
+        })
+      ).catch(() => {
+        // Condition failed = title was already customized, so do nothing
+      });
+      
 
     return NextResponse.json({ ok: true, message: msgItem });
   } catch (err) {

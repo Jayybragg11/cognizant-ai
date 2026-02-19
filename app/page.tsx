@@ -51,4 +51,51 @@ export default function Home() {
     setLoading(false);
     
   }
+
+  return (
+
+    <main className="min-h-screen flex items-center justify-center bg-gray-100 p-6">
+  
+      <div className="bg-white shadow-lg rounded-2xl p-6 w-full max-w-xl space-y-4">
+  
+        <h1 className="text-2xl font-bold text-center">
+          AI Prompt Tester
+        </h1>
+  
+        {/* text input where user types prompt */}
+        <textarea
+          value={prompt} // controlled input tied to state
+          onChange={(e) => setPrompt(e.target.value)} // update state as user types
+          placeholder="Ask anything..."
+          className="w-full border rounded-lg p-3 resize-none h-32"
+        />
+  
+        <div className="flex gap-2">
+  
+          {/* submit prompt to API */}
+          <button
+            onClick={handleSubmit}
+            disabled={loading} // prevents spam clicking while request runs
+            className="flex-1 bg-black text-white py-2 rounded-lg disabled:opacity-50"
+          >
+            {/* button text changes during request */}
+            {loading ? "Generating..." : "Submit"}
+          </button>
+  
+          {/* clear all UI state */}
+          <button
+            onClick={() => {
+              setPrompt("");
+              setResponse("");
+              setError("");
+            }}
+            className="px-4 border rounded-lg"
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+    </main>
+  );
+  
 }

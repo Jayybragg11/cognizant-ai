@@ -19,10 +19,10 @@ export default function Home() {
   /* store AI response */
   const [response, setResponse] = useState("");
 
-  /* loading state for submit button */
+  /* loading state */
   const [loading, setLoading] = useState(false);
 
-  /* error state (AI or history save errors) */
+  /* error state */
   const [error, setError] = useState("");
 
   /* store prompt history list */

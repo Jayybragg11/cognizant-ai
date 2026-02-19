@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 import { ddb, AI_HISTORY_TABLE } from "@/lib/dynamo";
-import { PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { PutCommand, QueryCommand, BatchWriteCommand } from "@aws-sdk/lib-dynamodb";
 
 const USER_ID = process.env.AI_HISTORY_USER_ID || "demo";
+
+type HistoryKey = { pk: string; sk: string };
 
 /* return latest history for this user */
 export async function GET() {
@@ -98,3 +100,76 @@ export async function POST(req: Request) {
     }
 }
 
+/* clears this user's saved prompt history */
+export async function DELETE() {
+    try {
+      /* build partition key for this user */
+      const pk = `USER#${USER_ID}`;
+  
+      /* Query DynamoDB to get the items we want to delete */
+      const result = await ddb.send(
+        new QueryCommand({
+          TableName: AI_HISTORY_TABLE,
+          KeyConditionExpression: "pk = :pk",
+          ExpressionAttributeValues: { ":pk": pk },
+          ProjectionExpression: "pk, sk", // only grab keys
+          ScanIndexForward: false,
+          Limit: 50 // limit how many we clear at once
+        })
+      );
+  
+      /* cast items into our typed key format */
+      const items = (result.Items ?? []) as HistoryKey[];
+  
+      /* if nothing exists, return early */
+      if (items.length === 0) {
+        return NextResponse.json({ ok: true, deleted: 0 });
+      }
+  
+      /*
+        Set dynamo batch write limit  to 25 items per request.
+        So we split results into chunks of 25.
+      */
+      const chunks: HistoryKey[][] = [];
+      for (let i = 0; i < items.length; i += 25) {
+        chunks.push(items.slice(i, i + 25));
+      }
+  
+      let deleted = 0;
+  
+      /*
+        Send delete requests in batches.
+        Each batch deletes up to 25 items.
+      */
+      for (const chunk of chunks) {
+        await ddb.send(
+          new BatchWriteCommand({
+            RequestItems: {
+              [AI_HISTORY_TABLE]: chunk.map((k: HistoryKey) => ({
+                DeleteRequest: {
+                  Key: { pk: k.pk, sk: k.sk }
+                }
+              }))
+            }
+          })
+        );
+  
+        /* keep track of how many were deleted */
+        deleted += chunk.length;
+      }
+  
+      /* return success and count */
+      return NextResponse.json({ ok: true, deleted });
+  
+    } catch (err) {
+  
+      /* log full error  */
+      console.error("HISTORY DELETE ERROR:", err);
+  
+      /* return safe message */
+      return NextResponse.json(
+        { error: "Failed to clear history" },
+        { status: 500 }
+      );
+    }
+  }

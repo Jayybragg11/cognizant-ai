@@ -3,17 +3,22 @@ import { ddb, AI_HISTORY_TABLE } from "@/lib/dynamo";
 import { PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 
 export const runtime = "nodejs";
+
+/* fallback demo user */
 const USER_ID = process.env.AI_HISTORY_USER_ID || "demo";
 
-/*Load all messages for a specific thread */
+/* =========================================================
+   GET → load all messages for a thread
+========================================================= */
 export async function GET(
   _req: Request,
-  ctx: { params: Promise<{ threadId: string }> }
+  { params }: { params: Promise<{ threadId: string }> }
 ) {
   try {
-    /* Next.js 15+: params is async */
-    const { threadId } = await ctx.params;
+    /* unwrap params (Next.js 15+ requirement) */
+    const { threadId } = await params;
 
+    /* messages stored under thread partition */
     const pk = `THREAD#${threadId}`;
 
     const result = await ddb.send(
@@ -21,28 +26,38 @@ export async function GET(
         TableName: AI_HISTORY_TABLE,
         KeyConditionExpression: "pk = :pk",
         ExpressionAttributeValues: { ":pk": pk },
-        ScanIndexForward: true // oldest -> newest
+        ScanIndexForward: true // oldest → newest
       })
     );
 
-    return NextResponse.json({ messages: result.Items ?? [] });
+    return NextResponse.json({
+      messages: result.Items ?? []
+    });
+
   } catch (err) {
     console.error("MESSAGES GET ERROR:", err);
-    return NextResponse.json({ error: "Failed to load messages" }, { status: 500 });
+    return NextResponse.json(
+      { error: "Failed to load messages" },
+      { status: 500 }
+    );
   }
 }
 
-/* POST: save one prompt/response pair to the thread */
+/* =========================================================
+   POST → save prompt + response to thread
+========================================================= */
 export async function POST(
   req: Request,
-  ctx: { params: Promise<{ threadId: string }> }
+  { params }: { params: Promise<{ threadId: string }> }
 ) {
   try {
-    /* Next.js 15+: params is async */
-    const { threadId } = await ctx.params;
+    /* unwrap dynamic route params */
+    const { threadId } = await params;
 
+    /* parse request body */
     const { prompt, response, latencyMs, model } = await req.json();
 
+    /* basic validation */
     if (!prompt || !response) {
       return NextResponse.json(
         { error: "prompt and response are required" },
@@ -51,6 +66,10 @@ export async function POST(
     }
 
     const now = new Date().toISOString();
+
+    /* ========================================
+       1) Save message item
+    ======================================== */
 
     const msgItem = {
       pk: `THREAD#${threadId}`,
@@ -62,7 +81,6 @@ export async function POST(
       model: model || "gpt-4o-mini"
     };
 
-    /* write message */
     await ddb.send(
       new PutCommand({
         TableName: AI_HISTORY_TABLE,
@@ -70,46 +88,40 @@ export async function POST(
       })
     );
 
-    /* update sidebar thread metadata */
-    await ddb.send(
-        new UpdateCommand({
-          TableName: AI_HISTORY_TABLE,
-          Key: {
-            pk: `USER#${USER_ID}`,
-            sk: `THREAD#${threadId}`
-          },
-          UpdateExpression:
-            "SET updatedAt = :u, title = if_not_exists(title, :tDefault)",
-          ExpressionAttributeValues: {
-            ":u": now,
-            ":tDefault": "New chat"
-          }
-        })
-      );
-      
-      /* If title is still the default, replace it with first prompt */
-      await ddb.send(
-        new UpdateCommand({
-          TableName: AI_HISTORY_TABLE,
-          Key: {
-            pk: `USER#${USER_ID}`,
-            sk: `THREAD#${threadId}`
-          },
-          UpdateExpression: "SET title = :t",
-          ConditionExpression: "title = :defaultTitle",
-          ExpressionAttributeValues: {
-            ":t": (prompt || "New chat").slice(0, 32),
-            ":defaultTitle": "New chat"
-          }
-        })
-      ).catch(() => {
-        // Condition failed = title was already customized, so do nothing
-      });
-      
+    /* ========================================
+       2) Update thread metadata
+       - updatedAt pushes thread to top
+       - title = first prompt if not set
+    ======================================== */
 
-    return NextResponse.json({ ok: true, message: msgItem });
+    await ddb.send(
+      new UpdateCommand({
+        TableName: AI_HISTORY_TABLE,
+        Key: {
+          pk: `USER#${USER_ID}`,
+          sk: `THREAD#${threadId}`
+        },
+        UpdateExpression:
+          "SET updatedAt = :u, title = if_not_exists(title, :t)",
+        ExpressionAttributeValues: {
+          ":u": now,
+          ":t": (prompt || "New chat").slice(0, 32)
+        }
+      })
+    );
+
+    /* success */
+    return NextResponse.json({
+      ok: true,
+      message: msgItem
+    });
+
   } catch (err) {
     console.error("MESSAGES POST ERROR:", err);
-    return NextResponse.json({ error: "Failed to save message" }, { status: 500 });
+
+    return NextResponse.json(
+      { error: "Failed to save message" },
+      { status: 500 }
+    );
   }
 }

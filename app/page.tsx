@@ -42,8 +42,11 @@ export default function Home() {
   /* AbortController for Stop button */
   const [controller, setController] = useState<AbortController | null>(null);
 
-  /* NEW: shows the user bubble immediately while we stream + save */
+  /* shows the user bubble immediately while we stream + save */
   const [pendingPrompt, setPendingPrompt] = useState<string>("");
+
+  /* optional: lets us show a small note when user stops generation */
+  const [stopped, setStopped] = useState(false);
 
   /* used to auto-scroll to the newest message */
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -97,7 +100,7 @@ export default function Home() {
   /* auto-scroll when messages change or streaming text updates */
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chatMessages.length, response, loading, pendingPrompt]);
+  }, [chatMessages.length, response, loading, pendingPrompt, stopped]);
 
   /* submit -> show user bubble -> stream -> save -> refresh */
   async function handleSubmit() {
@@ -114,6 +117,7 @@ export default function Home() {
     setLoading(true);
     setError("");
     setResponse("");
+    setStopped(false);
     setPrompt(""); // clears input immediately
 
     const ctrl = new AbortController();
@@ -169,22 +173,18 @@ export default function Home() {
         console.error("HISTORY SAVE ERROR:", historyData);
       } else {
         await loadHistory();
+
+        /* once it’s saved and now part of history, remove temp bubble */
+        setPendingPrompt("");
       }
 
-      /* clear streaming + temp user bubble once history is updated */
       setResponse("");
-      setPendingPrompt("");
     } catch (err: any) {
       if (err?.name === "AbortError") {
-        console.log("Streaming canceled by user");
-
-        /* if user stops, remove the temp user bubble (optional) */
-        setPendingPrompt("");
+        /* user hit Stop — keep the user bubble, keep partial response */
+        setStopped(true);
       } else {
         setError(err?.message || "Something went wrong");
-
-        /* if it failed, also clear the temp bubble so it doesn't hang */
-        setPendingPrompt("");
       }
     }
 
@@ -199,6 +199,7 @@ export default function Home() {
       await loadHistory();
       setResponse("");
       setPendingPrompt("");
+      setStopped(false);
       setError("");
     } catch (err) {
       console.error("CLEAR HISTORY ERROR:", err);
@@ -258,7 +259,7 @@ export default function Home() {
                 </div>
               ))}
 
-              {/* NEW: show user's message immediately (before Dynamo refresh) */}
+              {/* show user's message immediately (before Dynamo refresh) */}
               {pendingPrompt && (
                 <div className="flex justify-end">
                   <div className="max-w-[85%] rounded-2xl px-4 py-3 shadow-sm bg-black text-white whitespace-pre-wrap">
@@ -267,11 +268,16 @@ export default function Home() {
                 </div>
               )}
 
-              {/* Live streaming message bubble (assistant) */}
-              {loading && (
+              {/* streaming assistant bubble appears right after user bubble */}
+              {(loading || response) && (
                 <div className="flex justify-start">
                   <div className="max-w-[85%] rounded-2xl px-4 py-3 shadow-sm bg-white text-gray-900 whitespace-pre-wrap">
                     {response || "Thinking..."}
+                    {stopped && (
+                      <div className="mt-2 text-xs text-gray-500">
+                        Stopped
+                      </div>
+                    )}
                   </div>
                 </div>
               )}

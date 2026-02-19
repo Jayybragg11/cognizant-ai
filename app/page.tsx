@@ -42,6 +42,9 @@ export default function Home() {
   /* AbortController for Stop button */
   const [controller, setController] = useState<AbortController | null>(null);
 
+  /* NEW: shows the user bubble immediately while we stream + save */
+  const [pendingPrompt, setPendingPrompt] = useState<string>("");
+
   /* used to auto-scroll to the newest message */
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
@@ -94,9 +97,9 @@ export default function Home() {
   /* auto-scroll when messages change or streaming text updates */
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chatMessages.length, response, loading]);
+  }, [chatMessages.length, response, loading, pendingPrompt]);
 
-  /* submit -> stream -> save -> refresh */
+  /* submit -> show user bubble -> stream -> save -> refresh */
   async function handleSubmit() {
     if (!prompt.trim()) {
       setError("Please enter a prompt.");
@@ -104,10 +107,14 @@ export default function Home() {
     }
 
     const promptToSend = prompt; // keep a stable copy
+
+    /* show user's message immediately (ChatGPT behavior) */
+    setPendingPrompt(promptToSend);
+
     setLoading(true);
     setError("");
     setResponse("");
-    setPrompt(""); // feels more chat-like (clears input immediately)
+    setPrompt(""); // clears input immediately
 
     const ctrl = new AbortController();
     setController(ctrl);
@@ -164,12 +171,20 @@ export default function Home() {
         await loadHistory();
       }
 
+      /* clear streaming + temp user bubble once history is updated */
       setResponse("");
+      setPendingPrompt("");
     } catch (err: any) {
       if (err?.name === "AbortError") {
         console.log("Streaming canceled by user");
+
+        /* if user stops, remove the temp user bubble (optional) */
+        setPendingPrompt("");
       } else {
         setError(err?.message || "Something went wrong");
+
+        /* if it failed, also clear the temp bubble so it doesn't hang */
+        setPendingPrompt("");
       }
     }
 
@@ -183,6 +198,7 @@ export default function Home() {
       await fetch("/api/history", { method: "DELETE" });
       await loadHistory();
       setResponse("");
+      setPendingPrompt("");
       setError("");
     } catch (err) {
       console.error("CLEAR HISTORY ERROR:", err);
@@ -210,17 +226,20 @@ export default function Home() {
         <div className="flex-1 overflow-y-auto px-4 pb-28 mask-gradient">
           {historyLoading ? (
             <p className="text-sm text-gray-500">Loading chat...</p>
-          ) : chatMessages.length === 0 && !loading ? (
+          ) : chatMessages.length === 0 && !loading && !pendingPrompt ? (
             <div className="mt-10 text-center text-gray-500">
               <p className="text-lg font-medium">Start a conversation</p>
               <p className="text-sm">Ask anything and your chat will be saved.</p>
             </div>
           ) : (
             <div className="space-y-3 pb-10 pt-10">
+              {/* saved chat bubbles from Dynamo */}
               {chatMessages.map((m) => (
                 <div
                   key={m.id}
-                  className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
+                  className={`flex ${
+                    m.role === "user" ? "justify-end" : "justify-start"
+                  }`}
                 >
                   <div
                     className={`max-w-[85%] rounded-2xl px-4 py-3 shadow-sm whitespace-pre-wrap ${
@@ -238,6 +257,15 @@ export default function Home() {
                   </div>
                 </div>
               ))}
+
+              {/* NEW: show user's message immediately (before Dynamo refresh) */}
+              {pendingPrompt && (
+                <div className="flex justify-end">
+                  <div className="max-w-[85%] rounded-2xl px-4 py-3 shadow-sm bg-black text-white whitespace-pre-wrap">
+                    {pendingPrompt}
+                  </div>
+                </div>
+              )}
 
               {/* Live streaming message bubble (assistant) */}
               {loading && (

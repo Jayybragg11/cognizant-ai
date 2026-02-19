@@ -1,6 +1,9 @@
-// This mock replaces `import OpenAI from "openai"` in your route
 const createMock = jest.fn();
 
+/*
+  Minimal mock that matches how you call it:
+  client.chat.completions.create({ stream: true, ... })
+*/
 class OpenAI {
   chat = {
     completions: {
@@ -13,5 +16,5 @@ class OpenAI {
 
 export default OpenAI;
 
-// Allow tests to reach the mock easily
+/* exported so tests can control behavior */
 export const __openaiCreateMock = createMock;

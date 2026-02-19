@@ -31,6 +31,9 @@ export default function Home() {
   /* loading state for history panel */
   const [historyLoading, setHistoryLoading] = useState(false);
 
+  /* used to cancel the streaming request */
+  const [controller, setController] = useState<AbortController | null>(null);
+
   /* load prompt history from DynamoDB (via /api/history) */
   async function loadHistory() {
     setHistoryLoading(true);
@@ -56,80 +59,91 @@ export default function Home() {
   }, []);
 
   /* submit prompt -> get AI response -> save history -> refresh history */
-async function handleSubmit() {
-  /* basic frontend validation */
-  if (!prompt.trim()) {
-    setError("Please enter a prompt.");
-    return;
-  }
-
-  setLoading(true);
-  setError("");
-  setResponse("");
-
-  try {
-    /* call AI route (streaming) */
-    const aiRes = await fetch("/api/ai", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt })
-    });
-
-    /* if the request failed, read text error and throw */
-    if (!aiRes.ok) {
-      const msg = await aiRes.text();
-      throw new Error(msg || "AI request failed");
+  async function handleSubmit() {
+    /* basic frontend validation */
+    if (!prompt.trim()) {
+      setError("Please enter a prompt.");
+      return;
     }
 
-    /* get stream reader */
-    const reader = aiRes.body?.getReader();
-    if (!reader) throw new Error("No stream returned");
+    setLoading(true);
+    setError("");
+    setResponse("");
 
-    const decoder = new TextDecoder();
+    /* create controller so we can cancel request */
+    const ctrl = new AbortController();
+    setController(ctrl);
 
-    let fullText = "";
-    const start = Date.now(); // used to approximate latency since streaming returns plain text
+    try {
+      /* call AI route (streaming) */
+      const aiRes = await fetch("/api/ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
+        signal: ctrl.signal // allows Stop button to cancel
+      });
 
-    /* read chunks and update UI live */
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
+      /* if the request failed, read text error and throw */
+      if (!aiRes.ok) {
+        const msg = await aiRes.text();
+        throw new Error(msg || "AI request failed");
+      }
 
-      const chunk = decoder.decode(value);
-      fullText += chunk;
+      /* get stream reader */
+      const reader = aiRes.body?.getReader();
+      if (!reader) throw new Error("No stream returned");
+
+      const decoder = new TextDecoder();
+
+      let fullText = "";
+      const start = Date.now(); // approximate latency for streaming
+
+      /* read chunks and update UI live */
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value);
+        fullText += chunk;
 
       /* show response as it comes in */
-      setResponse(fullText);
-    }
+        setResponse(fullText);
+      }
 
     /* after streaming finishes, save to DynamoDB */
-    const historyRes = await fetch("/api/history", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        prompt,
-        response: fullText,
-        latencyMs: Date.now() - start,
-        model: "gpt-4o-mini"
-      })
-    });
+      const historyRes = await fetch("/api/history", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt,
+          response: fullText,
+          latencyMs: Date.now() - start,
+          model: "gpt-4o-mini"
+        })
+      });
 
-    const historyData = await historyRes.json();
+      const historyData = await historyRes.json();
 
-    /* if history save fails, we still keep response visible */
-    if (!historyRes.ok) {
-      console.error("HISTORY SAVE ERROR:", historyData);
-    } else {
-      /* refresh history list so new item appears */
-      await loadHistory();
+      /* if history save fails, we still keep response visible */
+      if (!historyRes.ok) {
+        console.error("HISTORY SAVE ERROR:", historyData);
+      } else {
+        /* refresh history list so new item appears */
+        await loadHistory();
+      }
+    } catch (err: any) {
+      /* if user canceled, don't show an error */
+      if (err?.name === "AbortError") {
+        console.log("Streaming canceled by user");
+      } else {
+        setError(err?.message || "Something went wrong");
+      }
     }
-  } catch (err: any) {
-    setError(err?.message || "Something went wrong");
+
+    /* reset UI states */
+    setController(null);
+    setLoading(false);
   }
-
-  setLoading(false);
-}
-
 
   /* clear UI input + response + error (does not clear DynamoDB history) */
   function handleClearUI() {
@@ -163,6 +177,7 @@ async function handleSubmit() {
 
         {/* action buttons */}
         <div className="flex gap-2">
+          {/* submit */}
           <button
             onClick={handleSubmit}
             disabled={loading}
@@ -171,10 +186,19 @@ async function handleSubmit() {
             {loading ? "Generating..." : "Submit"}
           </button>
 
-          <button
-            onClick={handleClearUI}
-            className="px-4 border rounded-lg"
-          >
+          {/* stop shows only while generating */}
+          {loading && controller && (
+            <button
+              onClick={() => controller.abort()}
+              className="px-4 border border-red-500 text-red-500 rounded-lg"
+              type="button"
+            >
+              Stop
+            </button>
+          )}
+
+          {/* clear UI */}
+          <button onClick={handleClearUI} className="px-4 border rounded-lg">
             Clear
           </button>
         </div>

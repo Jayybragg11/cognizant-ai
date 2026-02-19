@@ -4,7 +4,7 @@ import { PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 
 const USER_ID = process.env.AI_HISTORY_USER_ID || "demo";
 
-/* GET: return latest history for this user */
+/* return latest history for this user */
 export async function GET() {
     try {
   
@@ -45,3 +45,56 @@ export async function GET() {
       );
     }
   }
+  /* save a prompt response pair */
+export async function POST(req: Request) {
+    try {
+  
+      /* parse JSON body sent from frontend */
+      const { prompt, response, latencyMs, model } = await req.json();
+  
+      /* basic validation to prevent empty writes */
+      if (!prompt || !response) {
+        return NextResponse.json(
+          { error: "prompt and response are required" },
+          { status: 400 }
+        );
+      }
+  
+      /* timestamp used for sorting */
+      const createdAt = new Date().toISOString();
+  
+      /* build item exactly how Dynamo table expects it */
+      const item = {
+        pk: `USER#${USER_ID}`,      // partition key (groups records by user)
+        sk: `TS#${createdAt}`,      // sort key (orders records by time)
+        createdAt,
+        prompt,
+        response,
+        model: model || "gpt-4o-mini",
+        latencyMs: latencyMs ?? null
+      };
+  
+      /* write item into DynamoDB table */
+      await ddb.send(
+        new PutCommand({
+          TableName: AI_HISTORY_TABLE,
+          Item: item
+        })
+      );
+  
+      /* return confirmation and saved item */
+      return NextResponse.json({ ok: true, item });
+  
+    } catch (err) {
+  
+      /* log actual error for debugging */
+      console.error("HISTORY POST ERROR:", err);
+  
+      /* return safe error response */
+      return NextResponse.json(
+        { error: "Failed to save history" },
+        { status: 500 }
+      );
+    }
+}
+

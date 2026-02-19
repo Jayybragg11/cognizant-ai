@@ -94,6 +94,19 @@ export default function Home() {
             Clear
           </button>
         </div>
+  
+        {/* show error message only if one exists */}
+        {error && (
+          <p className="text-red-500 text-sm">{error}</p>
+        )}
+  
+        {/* show AI response only after successful request */}
+        {response && (
+          <div className="border rounded-lg p-3 bg-gray-50 whitespace-pre-wrap">
+            {response}
+          </div>
+        )}
+  
       </div>
     </main>
   );

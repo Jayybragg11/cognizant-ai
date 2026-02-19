@@ -58,6 +58,9 @@ export default function Home() {
   const [error, setError] = useState("");
   const [stopped, setStopped] = useState(false);
 
+  /* ---------- RETRY STATE ---------- */
+  const [lastPrompt, setLastPrompt] = useState<string>("");
+
   /* scroll anchor */
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
@@ -69,9 +72,7 @@ export default function Home() {
     try {
       const res = await fetch("/api/threads");
       const data = await res.json();
-
       if (!res.ok) throw new Error(data?.error || "Failed to load threads");
-
       setThreads(Array.isArray(data.threads) ? data.threads : []);
     } catch (err) {
       console.error("THREAD LOAD ERROR:", err);
@@ -85,19 +86,21 @@ export default function Home() {
   async function createThreadAndSelect() {
     const res = await fetch("/api/threads", { method: "POST" });
     const data = await res.json();
-    if (!res.ok) throw new Error(data?.error);
+    if (!res.ok) throw new Error(data?.error || "Failed to create thread");
 
     const t: Thread = data.thread;
 
-    /* optimistic UI update */
+    /* optimistic sidebar insert */
     setThreads((prev) => [t, ...prev]);
 
+    /* reset UI for new chat */
     setActiveThreadId(t.threadId);
     setItems([]);
     setResponse("");
     setPendingPrompt("");
     setStopped(false);
     setError("");
+    setLastPrompt("");
   }
 
   /* =========================
@@ -107,45 +110,36 @@ export default function Home() {
     if (!threadId) return;
 
     setMessagesLoading(true);
-
     try {
       const res = await fetch(`/api/threads/${threadId}/messages`);
       const data = await res.json();
 
       if (!res.ok) throw new Error(data?.error || "Failed to load messages");
-
       setItems(Array.isArray(data.messages) ? data.messages : []);
     } catch (err: any) {
       console.error("MESSAGE LOAD ERROR:", err);
       setError(err?.message || "Failed to load messages");
     }
-
     setMessagesLoading(false);
   }
 
   /* =========================
      SELECT THREAD (CLEAN SWITCH)
-     - Stops streaming
-     - Clears temporary UI state
-     - Loads messages for clicked thread
   ========================= */
   async function handleSelectThread(threadId: string) {
-    // If a stream is running, stop it before switching chats
+    /* stop any in-progress stream before switching */
     controller?.abort();
     setController(null);
 
-    // Clear "in-flight" UI so it doesn't bleed into the next thread
     setLoading(false);
     setStopped(false);
     setError("");
     setResponse("");
     setPendingPrompt("");
+    setLastPrompt("");
 
-    // Switch thread + clear existing messages immediately (feels snappy)
     setActiveThreadId(threadId);
     setItems([]);
-
-    // Load selected thread messages now (no need to wait for useEffect)
     await loadMessages(threadId);
   }
 
@@ -159,12 +153,10 @@ export default function Home() {
     if (threadsLoading) return;
 
     if (!activeThreadId) {
-      if (threads.length > 0) {
-        setActiveThreadId(threads[0].threadId);
-      } else {
-        createThreadAndSelect();
-      }
+      if (threads.length > 0) setActiveThreadId(threads[0].threadId);
+      else createThreadAndSelect();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadsLoading, threads.length]);
 
   /* load messages when thread changes (safety net) */
@@ -202,25 +194,20 @@ export default function Home() {
   /* auto-scroll */
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chatMessages.length, response, pendingPrompt, loading]);
+  }, [chatMessages.length, response, pendingPrompt, loading, stopped, error]);
 
   /* =========================
-     SEND MESSAGE
+     CORE SEND (used by Send + Retry)
   ========================= */
-  async function handleSubmit() {
+  async function sendPrompt(promptToSend: string) {
     if (!activeThreadId) return;
 
-    if (!prompt.trim()) {
-      setError("Please enter a prompt.");
-      return;
-    }
+    /* remember this prompt so Retry can re-send it */
+    setLastPrompt(promptToSend);
 
-    const promptToSend = prompt;
-
-    /* show user bubble immediately */
+    /* show user bubble instantly */
     setPendingPrompt(promptToSend);
 
-    setPrompt("");
     setLoading(true);
     setError("");
     setResponse("");
@@ -249,16 +236,14 @@ export default function Home() {
       let fullText = "";
       const start = Date.now();
 
-      /* stream response */
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-
         fullText += decoder.decode(value);
         setResponse(fullText);
       }
 
-      /* save message */
+      /* save the completed answer into the thread */
       const saveRes = await fetch(`/api/threads/${activeThreadId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -273,23 +258,54 @@ export default function Home() {
       const saveData = await saveRes.json();
       if (!saveRes.ok) throw new Error(saveData?.error || "Failed to save message");
 
-      /* refresh UI */
+      /* refresh sidebar + message list */
       await loadMessages(activeThreadId);
       await loadThreads();
 
+      /* clear temp UI once saved */
       setPendingPrompt("");
       setResponse("");
+      setStopped(false);
+      setError("");
     } catch (err: any) {
       if (err?.name === "AbortError") {
-        // user clicked Stop: keep bubbles visible
+        /* user clicked Stop — keep bubbles visible */
         setStopped(true);
       } else {
+        /* request failed — show error bubble + allow retry */
         setError(err?.message || "Something went wrong");
       }
+    } finally {
+      setController(null);
+      setLoading(false);
+    }
+  }
+
+  /* =========================
+     SEND MESSAGE (button)
+  ========================= */
+  async function handleSubmit() {
+    if (!prompt.trim()) {
+      setError("Please enter a prompt.");
+      return;
     }
 
-    setController(null);
-    setLoading(false);
+    const promptToSend = prompt;
+    setPrompt("");
+    await sendPrompt(promptToSend);
+  }
+
+  /* =========================
+     RETRY LAST MESSAGE
+  ========================= */
+  async function handleRetry() {
+    if (!lastPrompt) return;
+
+    /* clear old error before retry */
+    setError("");
+    setStopped(false);
+
+    await sendPrompt(lastPrompt);
   }
 
   /* =========================
@@ -317,17 +333,14 @@ export default function Home() {
   const activeTitle =
     threads.find((t) => t.threadId === activeThreadId)?.title || "AI Chat";
 
-  /* =========================
-     UI
-  ========================= */
+  const canRetry = !!lastPrompt && (!!error || stopped) && !loading;
 
   return (
     <main className="h-screen flex bg-[var(--cog-bg)] text-[var(--cog-text)]">
       <div className="h-screen flex w-full">
         {/* Sidebar */}
         <aside className="w-80 bg-[var(--cog-surface)] border-r border-[var(--cog-border)] hidden md:flex flex-col">
-          {/* Sidebar header */}
-          <div className="p-4 flex items-center justify-between border-[var(--cog-border)]">
+          <div className="p-4 flex items-center justify-between border-b border-[var(--cog-border)]">
             <h2 className="font-semibold tracking-tight">Chats</h2>
 
             <button
@@ -339,16 +352,11 @@ export default function Home() {
             </button>
           </div>
 
-          {/* Thread list */}
           <div className="px-2 pb-3 overflow-y-auto">
             {threadsLoading ? (
-              <p className="text-sm text-[var(--cog-muted)] px-2 py-2">
-                Loading…
-              </p>
+              <p className="text-sm text-[var(--cog-muted)] px-2 py-2">Loading…</p>
             ) : threads.length === 0 ? (
-              <p className="text-sm text-[var(--cog-muted)] px-2 py-2">
-                No chats yet.
-              </p>
+              <p className="text-sm text-[var(--cog-muted)] px-2 py-2">No chats yet.</p>
             ) : (
               <ul className="space-y-1">
                 {threads.map((t) => {
@@ -365,9 +373,7 @@ export default function Home() {
                         }`}
                       >
                         <div className="min-w-0">
-                          <p className="text-sm font-medium truncate">
-                            {t.title || "New chat"}
-                          </p>
+                          <p className="text-sm font-medium truncate">{t.title || "New chat"}</p>
                           <p className="text-xs text-[var(--cog-muted)] truncate">
                             {new Date(t.updatedAt || t.createdAt).toLocaleString()}
                           </p>
@@ -397,9 +403,7 @@ export default function Home() {
         <section className="flex-1 flex flex-col">
           {/* Header */}
           <div className="p-4 flex items-center justify-between border-b border-[var(--cog-border)] bg-[var(--cog-surface)]">
-            <h1 className="text-lg font-semibold tracking-tight">
-              {activeTitle}
-            </h1>
+            <h1 className="text-lg font-semibold tracking-tight">{activeTitle}</h1>
 
             <button
               onClick={handleNewChat}
@@ -413,25 +417,19 @@ export default function Home() {
           {/* Messages */}
           <div className="flex-1 overflow-y-auto px-4 pb-28">
             {messagesLoading ? (
-              <p className="text-sm text-[var(--cog-muted)] py-4">
-                Loading chat…
-              </p>
+              <p className="text-sm text-[var(--cog-muted)] py-4">Loading chat…</p>
             ) : chatMessages.length === 0 && !loading && !pendingPrompt ? (
               <div className="mt-10 text-center text-[var(--cog-muted)]">
-                <p className="text-lg font-medium text-[var(--cog-text)]">
-                  Start a conversation
-                </p>
+                <p className="text-lg font-medium text-[var(--cog-text)]">Start a conversation</p>
                 <p className="text-sm">This chat is saved by thread.</p>
               </div>
             ) : (
               <div className="space-y-3 pb-10 pt-6">
-                {/* Saved messages */}
+                {/* saved messages */}
                 {chatMessages.map((m) => (
                   <div
                     key={m.id}
-                    className={`flex ${
-                      m.role === "user" ? "justify-end" : "justify-start"
-                    }`}
+                    className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
                   >
                     <div
                       className={`max-w-[85%] rounded-2xl px-4 py-3 whitespace-pre-wrap ${
@@ -441,18 +439,14 @@ export default function Home() {
                       }`}
                     >
                       {m.text}
-
-                      {/* Tiny perf/latency footer (optional) */}
                       {m.role === "assistant" && m.latencyMs ? (
-                        <div className="mt-2 text-xs text-[var(--cog-muted)]">
-                          {m.latencyMs}ms
-                        </div>
+                        <div className="mt-2 text-xs text-[var(--cog-muted)]">{m.latencyMs}ms</div>
                       ) : null}
                     </div>
                   </div>
                 ))}
 
-                {/* Pending user bubble (shows instantly) */}
+                {/* pending user bubble */}
                 {pendingPrompt && (
                   <div className="flex justify-end">
                     <div className="max-w-[85%] rounded-2xl px-4 py-3 bg-[var(--cog-navy)] text-white shadow-sm whitespace-pre-wrap">
@@ -461,26 +455,47 @@ export default function Home() {
                   </div>
                 )}
 
-                {/* Streaming assistant bubble */}
+                {/* streaming assistant bubble */}
                 {(loading || response) && (
                   <div className="flex justify-start">
                     <div className="max-w-[85%] rounded-2xl px-4 py-3 bg-[var(--cog-surface)] text-[var(--cog-text)] border border-[var(--cog-border)] shadow-sm whitespace-pre-wrap">
                       {response || "Thinking..."}
                       {stopped && (
-                        <div className="mt-2 text-xs text-[var(--cog-muted)]">
-                          Stopped
-                        </div>
+                        <div className="mt-2 text-xs text-[var(--cog-muted)]">Stopped</div>
                       )}
                     </div>
                   </div>
                 )}
 
-                {/* Error bubble */}
+                {/* error bubble + retry */}
                 {error && (
                   <div className="flex justify-start">
                     <div className="max-w-[85%] rounded-2xl px-4 py-3 bg-red-50 text-red-700 border border-red-200">
-                      {error}
+                      <div>{error}</div>
+
+                      {canRetry && (
+                        <button
+                          onClick={handleRetry}
+                          className="mt-2 text-xs underline"
+                          type="button"
+                        >
+                          Retry
+                        </button>
+                      )}
                     </div>
+                  </div>
+                )}
+
+                {/* stopped state retry (if no error bubble is showing) */}
+                {!error && canRetry && (
+                  <div className="flex justify-start">
+                    <button
+                      onClick={handleRetry}
+                      className="text-xs underline text-[var(--cog-muted)] hover:text-[var(--cog-text)]"
+                      type="button"
+                    >
+                      Retry last message
+                    </button>
                   </div>
                 )}
 

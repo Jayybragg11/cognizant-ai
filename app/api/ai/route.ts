@@ -1,53 +1,58 @@
 import OpenAI from "openai";
-import { NextResponse } from "next/server";
 
-/*Create openai client*/ 
+/* make sure this route runs on Node (better for OpenAI + AWS) */
+export const runtime = "nodejs";
+
+/* Create openai client */
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-/*Post handler to interact with backend*/ 
+/* POST handler (streams text back as it is generated) */
 export async function POST(req: Request) {
   try {
-
-    /* parse through the incoming question prompt */
+    /* parse incoming prompt */
     const { prompt } = await req.json();
 
-    /* check if the prompt is valid if so throw 400 error */
+    /* basic validation */
     if (!prompt || prompt.trim() === "") {
-      return NextResponse.json(
-        { error: "Prompt is required" },
-        { status: 400 }
-      );
+      return new Response("Prompt is required", { status: 400 });
     }
-    /* set time to check for how long request took */
-    const start = Date.now();
 
-    /* Call openai and send the chat */
-    const completion = await client.chat.completions.create({
+    /* start OpenAI streaming response */
+    const stream = await client.chat.completions.create({
       model: "gpt-4o-mini",
+      stream: true,
       messages: [{ role: "user", content: prompt }]
     });
 
-    /* pull back the response from openai */
-    const responseText =
-      completion.choices[0]?.message?.content || "No response";
+    /* convert OpenAI chunks into a plain text stream for the browser */
+    const encoder = new TextEncoder();
 
-    /* send response from openai to frontend */
-    return NextResponse.json({
-      response: responseText,
-      latencyMs: Date.now() - start
+    const readable = new ReadableStream({
+      async start(controller) {
+        try {
+          for await (const chunk of stream) {
+            /* each chunk may contain a small piece of text (token) */
+            const token = chunk.choices[0]?.delta?.content || "";
+            controller.enqueue(encoder.encode(token));
+          }
+        } finally {
+          /* close stream when OpenAI finishes */
+          controller.close();
+        }
+      }
     });
 
-    /* catch and failures or errors from openai */
+    /* return the text stream (frontend will read it live) */
+    return new Response(readable, {
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-cache"
+      }
+    });
   } catch (err) {
-    console.error("AI ERROR:", err);
-
-    return NextResponse.json(
-      { error: "AI request failed" },
-      { status: 500 }
-    );
+    console.error("AI STREAM ERROR:", err);
+    return new Response("AI request failed", { status: 500 });
   }
 }
-
-

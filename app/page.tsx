@@ -56,59 +56,80 @@ export default function Home() {
   }, []);
 
   /* submit prompt -> get AI response -> save history -> refresh history */
-  async function handleSubmit() {
-    /* basic frontend validation */
-    if (!prompt.trim()) {
-      setError("Please enter a prompt.");
-      return;
-    }
-
-    setLoading(true);
-    setError("");
-    setResponse("");
-
-    try {
-      /* 1) call AI route */
-      const aiRes = await fetch("/api/ai", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
-      });
-
-      const aiData = await aiRes.json();
-
-      if (!aiRes.ok) throw new Error(aiData?.error || "AI request failed");
-
-      /* 2) show response immediately */
-      setResponse(aiData.response);
-
-      /* 3) save prompt + response to DynamoDB */
-      const historyRes = await fetch("/api/history", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt,
-          response: aiData.response,
-          latencyMs: aiData.latencyMs,
-          model: "gpt-4o-mini",
-        }),
-      });
-
-      const historyData = await historyRes.json();
-
-      /* if history save fails, we still keep the AI response visible */
-      if (!historyRes.ok) {
-        console.error("HISTORY SAVE ERROR:", historyData);
-      } else {
-        /* 4) refresh history list so the new item appears */
-        await loadHistory();
-      }
-    } catch (err: any) {
-      setError(err?.message || "Something went wrong");
-    }
-
-    setLoading(false);
+async function handleSubmit() {
+  /* basic frontend validation */
+  if (!prompt.trim()) {
+    setError("Please enter a prompt.");
+    return;
   }
+
+  setLoading(true);
+  setError("");
+  setResponse("");
+
+  try {
+    /* call AI route (streaming) */
+    const aiRes = await fetch("/api/ai", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt })
+    });
+
+    /* if the request failed, read text error and throw */
+    if (!aiRes.ok) {
+      const msg = await aiRes.text();
+      throw new Error(msg || "AI request failed");
+    }
+
+    /* get stream reader */
+    const reader = aiRes.body?.getReader();
+    if (!reader) throw new Error("No stream returned");
+
+    const decoder = new TextDecoder();
+
+    let fullText = "";
+    const start = Date.now(); // used to approximate latency since streaming returns plain text
+
+    /* read chunks and update UI live */
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value);
+      fullText += chunk;
+
+      /* show response as it comes in */
+      setResponse(fullText);
+    }
+
+    /* after streaming finishes, save to DynamoDB */
+    const historyRes = await fetch("/api/history", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt,
+        response: fullText,
+        latencyMs: Date.now() - start,
+        model: "gpt-4o-mini"
+      })
+    });
+
+    const historyData = await historyRes.json();
+
+    /* if history save fails, we still keep response visible */
+    if (!historyRes.ok) {
+      console.error("HISTORY SAVE ERROR:", historyData);
+    } else {
+      /* refresh history list so new item appears */
+      await loadHistory();
+    }
+  } catch (err: any) {
+    setError(err?.message || "Something went wrong");
+  }
+
+  setLoading(false);
+}
+
 
   /* clear UI input + response + error (does not clear DynamoDB history) */
   function handleClearUI() {

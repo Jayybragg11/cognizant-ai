@@ -1,6 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+
+type HistoryItem = {
+  pk: string;
+  sk: string;
+  createdAt: string;
+  prompt: string;
+  response: string;
+  model?: string;
+  latencyMs?: number | null;
+};
 
 export default function Home() {
   /* store prompt input */
@@ -9,106 +19,195 @@ export default function Home() {
   /* store AI response */
   const [response, setResponse] = useState("");
 
-  /* loading state */
+  /* loading state for submit button */
   const [loading, setLoading] = useState(false);
 
-  /* error state */
+  /* error state (AI or history save errors) */
   const [error, setError] = useState("");
 
-  /* send prompt to API */
+  /* store prompt history list */
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+
+  /* loading state for history panel */
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  /* load prompt history from DynamoDB (via /api/history) */
+  async function loadHistory() {
+    setHistoryLoading(true);
+
+    try {
+      const res = await fetch("/api/history", { method: "GET" });
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data?.error || "Failed to load history");
+
+      setHistory(Array.isArray(data.items) ? data.items : []);
+    } catch (err) {
+      // keep this quiet so UI still works even if history fails
+      console.error("LOAD HISTORY ERROR:", err);
+    }
+
+    setHistoryLoading(false);
+  }
+
+  /* run once on page load */
+  useEffect(() => {
+    loadHistory();
+  }, []);
+
+  /* submit prompt -> get AI response -> save history -> refresh history */
   async function handleSubmit() {
+    /* basic frontend validation */
+    if (!prompt.trim()) {
+      setError("Please enter a prompt.");
+      return;
+    }
+
     setLoading(true);
     setError("");
     setResponse("");
 
     try {
-      /* send prompt to our backend API route */
-      const res = await fetch("/api/ai", {
+      /* 1) call AI route */
+      const aiRes = await fetch("/api/ai", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ prompt }) // send user input as JSON
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
       });
-    
-      /* convert response from API into usable object */
-      const data = await res.json();
-    
-      /* if backend returned an error status, throw it so catch block handles it */
-      if (!res.ok) throw new Error(data.error);
-    
-      /* store AI response in state so it renders on screen */
-      setResponse(data.response);
-    
+
+      const aiData = await aiRes.json();
+
+      if (!aiRes.ok) throw new Error(aiData?.error || "AI request failed");
+
+      /* 2) show response immediately */
+      setResponse(aiData.response);
+
+      /* 3) save prompt + response to DynamoDB */
+      const historyRes = await fetch("/api/history", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt,
+          response: aiData.response,
+          latencyMs: aiData.latencyMs,
+          model: "gpt-4o-mini",
+        }),
+      });
+
+      const historyData = await historyRes.json();
+
+      /* if history save fails, we still keep the AI response visible */
+      if (!historyRes.ok) {
+        console.error("HISTORY SAVE ERROR:", historyData);
+      } else {
+        /* 4) refresh history list so the new item appears */
+        await loadHistory();
+      }
     } catch (err: any) {
-    
-      /* if request fails or API throws error, show message to user */
-      setError(err.message || "Something went wrong");
-    
+      setError(err?.message || "Something went wrong");
     }
-    
-    /* stop loading spinner whether request succeeded or failed */
+
     setLoading(false);
-    
+  }
+
+  /* clear UI input + response + error (does not clear DynamoDB history) */
+  function handleClearUI() {
+    setPrompt("");
+    setResponse("");
+    setError("");
+  }
+
+  /* clear DynamoDB history */
+  async function handleClearHistory() {
+    try {
+      await fetch("/api/history", { method: "DELETE" });
+      await loadHistory();
+    } catch (err) {
+      console.error("CLEAR HISTORY ERROR:", err);
+    }
   }
 
   return (
-
     <main className="min-h-screen flex items-center justify-center bg-gray-100 p-6">
-  
       <div className="bg-white shadow-lg rounded-2xl p-6 w-full max-w-xl space-y-4">
-  
-        <h1 className="text-2xl font-bold text-center">
-          AI Prompt Tester
-        </h1>
-  
-        {/* text input where user types prompt */}
+        <h1 className="text-2xl font-bold text-center">AI Prompt Tester</h1>
+
+        {/* prompt input */}
         <textarea
-          value={prompt} // controlled input tied to state
-          onChange={(e) => setPrompt(e.target.value)} // update state as user types
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
           placeholder="Ask anything..."
           className="w-full border rounded-lg p-3 resize-none h-32"
         />
-  
+
+        {/* action buttons */}
         <div className="flex gap-2">
-  
-          {/* submit prompt to API */}
           <button
             onClick={handleSubmit}
-            disabled={loading} // prevents spam clicking while request runs
+            disabled={loading}
             className="flex-1 bg-black text-white py-2 rounded-lg disabled:opacity-50"
           >
-            {/* button text changes during request */}
             {loading ? "Generating..." : "Submit"}
           </button>
-  
-          {/* clear all UI state */}
+
           <button
-            onClick={() => {
-              setPrompt("");
-              setResponse("");
-              setError("");
-            }}
+            onClick={handleClearUI}
             className="px-4 border rounded-lg"
           >
             Clear
           </button>
         </div>
-  
-        {/* show error message only if one exists */}
-        {error && (
-          <p className="text-red-500 text-sm">{error}</p>
-        )}
-  
-        {/* show AI response only after successful request */}
+
+        {/* error */}
+        {error && <p className="text-red-500 text-sm">{error}</p>}
+
+        {/* response */}
         {response && (
           <div className="border rounded-lg p-3 bg-gray-50 whitespace-pre-wrap">
             {response}
           </div>
         )}
-  
+
+        {/* history section */}
+        <div className="pt-2">
+          <div className="flex items-center justify-between">
+            <h2 className="font-semibold">History</h2>
+
+            <button
+              onClick={handleClearHistory}
+              className="text-sm underline"
+              type="button"
+            >
+              Clear history
+            </button>
+          </div>
+
+          {historyLoading ? (
+            <p className="text-sm text-gray-500">Loading history...</p>
+          ) : history.length === 0 ? (
+            <p className="text-sm text-gray-500">No history yet.</p>
+          ) : (
+            <ul className="mt-2 space-y-2">
+              {history.map((h) => (
+                <li key={h.sk} className="border rounded-lg p-3 bg-gray-50">
+                  <p className="text-xs text-gray-500">
+                    {new Date(h.createdAt).toLocaleString()}
+                    {h.latencyMs ? ` • ${h.latencyMs}ms` : ""}
+                  </p>
+
+                  <p className="text-sm font-medium mt-2">Prompt:</p>
+                  <p className="text-sm text-gray-700">{h.prompt}</p>
+
+                  <p className="text-sm font-medium mt-2">Response:</p>
+                  <p className="text-sm text-gray-700 whitespace-pre-wrap">
+                    {h.response}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </div>
     </main>
   );
-  
 }

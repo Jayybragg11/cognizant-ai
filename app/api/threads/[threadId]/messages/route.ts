@@ -3,63 +3,46 @@ import { ddb, AI_HISTORY_TABLE } from "@/lib/dynamo";
 import { PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 
 export const runtime = "nodejs";
-
-/*Temporary user identifier.*/
 const USER_ID = process.env.AI_HISTORY_USER_ID || "demo";
 
 /*Load all messages for a specific thread */
 export async function GET(
   _req: Request,
-  { params }: { params: { threadId: string } }
+  ctx: { params: Promise<{ threadId: string }> }
 ) {
   try {
-    /*Messages are stored under a thread partition key */
-    const pk = `THREAD#${params.threadId}`;
+    /* Next.js 15+: params is async */
+    const { threadId } = await ctx.params;
+
+    const pk = `THREAD#${threadId}`;
 
     const result = await ddb.send(
       new QueryCommand({
         TableName: AI_HISTORY_TABLE,
-
-        /*
-          Fetch all items belonging to this thread
-        */
         KeyConditionExpression: "pk = :pk",
-
         ExpressionAttributeValues: { ":pk": pk },
-
-        /*
-          true = chronological order
-          (oldest messages first for chat UI)
-        */
-        ScanIndexForward: true
+        ScanIndexForward: true // oldest -> newest
       })
     );
 
-    /* Return messages list to frontend */
     return NextResponse.json({ messages: result.Items ?? [] });
-
   } catch (err) {
     console.error("MESSAGES GET ERROR:", err);
-
-    return NextResponse.json(
-      { error: "Failed to load messages" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to load messages" }, { status: 500 });
   }
 }
 
-/* Save one prompt + response pair to thread called after AI finishes generating response*/
+/* POST: save one prompt/response pair to the thread */
 export async function POST(
   req: Request,
-  { params }: { params: { threadId: string } }
+  ctx: { params: Promise<{ threadId: string }> }
 ) {
   try {
-    /*
-      Extract message data from request body
-    */
+    /* Next.js 15+: params is async */
+    const { threadId } = await ctx.params;
+
     const { prompt, response, latencyMs, model } = await req.json();
 
-    /* Basic validation */
     if (!prompt || !response) {
       return NextResponse.json(
         { error: "prompt and response are required" },
@@ -67,13 +50,11 @@ export async function POST(
       );
     }
 
-    /* timestamp used for sorting + unique message key */
     const now = new Date().toISOString();
 
-    /*Message item structure*/
     const msgItem = {
-      pk: `THREAD#${params.threadId}`, // thread partition
-      sk: `MSG#${now}`,                 // unique message key
+      pk: `THREAD#${threadId}`,
+      sk: `MSG#${now}`,
       createdAt: now,
       prompt,
       response,
@@ -81,7 +62,7 @@ export async function POST(
       model: model || "gpt-4o-mini"
     };
 
-    /* Save message to DynamoDB */
+    /* write message */
     await ddb.send(
       new PutCommand({
         TableName: AI_HISTORY_TABLE,
@@ -89,33 +70,25 @@ export async function POST(
       })
     );
 
-    /*Update thread metadata so sidebar reflects activity*/
+    /* update sidebar thread metadata */
     await ddb.send(
       new UpdateCommand({
         TableName: AI_HISTORY_TABLE,
         Key: {
           pk: `USER#${USER_ID}`,
-          sk: `THREAD#${params.threadId}`
+          sk: `THREAD#${threadId}`
         },
-        UpdateExpression:
-          "SET updatedAt = :u, title = if_not_exists(title, :t)",
-
+        UpdateExpression: "SET updatedAt = :u, title = if_not_exists(title, :t)",
         ExpressionAttributeValues: {
           ":u": now,
-          ":t": (prompt || "New chat").slice(0, 32) // short preview title
+          ":t": (prompt || "New chat").slice(0, 32)
         }
       })
     );
 
-    /* Send saved message back to frontend */
     return NextResponse.json({ ok: true, message: msgItem });
-
   } catch (err) {
     console.error("MESSAGES POST ERROR:", err);
-
-    return NextResponse.json(
-      { error: "Failed to save message" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to save message" }, { status: 500 });
   }
 }

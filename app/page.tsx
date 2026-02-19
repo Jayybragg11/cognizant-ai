@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type HistoryItem = {
   pk: string;
@@ -12,11 +12,19 @@ type HistoryItem = {
   latencyMs?: number | null;
 };
 
+type ChatMsg = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  createdAt: string;
+  latencyMs?: number | null;
+};
+
 export default function Home() {
-  /* store prompt input */
+  /* prompt input */
   const [prompt, setPrompt] = useState("");
 
-  /* store AI response */
+  /* current streaming response text (not yet saved until finished) */
   const [response, setResponse] = useState("");
 
   /* loading state */
@@ -25,52 +33,82 @@ export default function Home() {
   /* error state */
   const [error, setError] = useState("");
 
-  /* store prompt history list */
+  /* history items from Dynamo (prompt/response pairs) */
   const [history, setHistory] = useState<HistoryItem[]>([]);
 
-  /* loading state for history panel */
+  /* loading state for history */
   const [historyLoading, setHistoryLoading] = useState(false);
 
-  /* used to cancel the streaming request */
+  /* AbortController for Stop button */
   const [controller, setController] = useState<AbortController | null>(null);
 
-  /* load prompt history from DynamoDB (via /api/history) */
+  /* used to auto-scroll to the newest message */
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  /* load history from Dynamo */
   async function loadHistory() {
     setHistoryLoading(true);
-
     try {
       const res = await fetch("/api/history", { method: "GET" });
       const data = await res.json();
-
       if (!res.ok) throw new Error(data?.error || "Failed to load history");
-
       setHistory(Array.isArray(data.items) ? data.items : []);
     } catch (err) {
-      // keep this quiet so UI still works even if history fails
       console.error("LOAD HISTORY ERROR:", err);
     }
-
     setHistoryLoading(false);
   }
 
-  /* run once on page load */
   useEffect(() => {
     loadHistory();
   }, []);
 
-  /* submit prompt -> get AI response -> save history -> refresh history */
+  /* build chat messages from history so we can render ChatGPT-style bubbles */
+  const chatMessages: ChatMsg[] = useMemo(() => {
+    // history from API is newest first (ScanIndexForward: false),
+    // but chat UI should be oldest -> newest
+    const ordered = [...history].reverse();
+
+    const msgs: ChatMsg[] = [];
+
+    for (const h of ordered) {
+      msgs.push({
+        id: `${h.sk}-user`,
+        role: "user",
+        text: h.prompt,
+        createdAt: h.createdAt
+      });
+
+      msgs.push({
+        id: `${h.sk}-assistant`,
+        role: "assistant",
+        text: h.response,
+        createdAt: h.createdAt,
+        latencyMs: h.latencyMs ?? null
+      });
+    }
+
+    return msgs;
+  }, [history]);
+
+  /* auto-scroll when messages change or streaming text updates */
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages.length, response, loading]);
+
+  /* submit -> stream -> save -> refresh */
   async function handleSubmit() {
-    /* basic frontend validation */
     if (!prompt.trim()) {
       setError("Please enter a prompt.");
       return;
     }
 
+    const promptToSend = prompt; // keep a stable copy
     setLoading(true);
     setError("");
     setResponse("");
+    setPrompt(""); // feels more chat-like (clears input immediately)
 
-    /* create controller so we can cancel request */
     const ctrl = new AbortController();
     setController(ctrl);
 
@@ -79,43 +117,39 @@ export default function Home() {
       const aiRes = await fetch("/api/ai", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
-        signal: ctrl.signal // allows Stop button to cancel
+        body: JSON.stringify({ prompt: promptToSend }),
+        signal: ctrl.signal
       });
 
-      /* if the request failed, read text error and throw */
       if (!aiRes.ok) {
         const msg = await aiRes.text();
         throw new Error(msg || "AI request failed");
       }
 
-      /* get stream reader */
       const reader = aiRes.body?.getReader();
       if (!reader) throw new Error("No stream returned");
 
       const decoder = new TextDecoder();
 
       let fullText = "";
-      const start = Date.now(); // approximate latency for streaming
+      const start = Date.now();
 
-      /* read chunks and update UI live */
+      /* stream tokens into UI */
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
 
         const chunk = decoder.decode(value);
         fullText += chunk;
-
-      /* show response as it comes in */
         setResponse(fullText);
       }
 
-    /* after streaming finishes, save to DynamoDB */
+      /* save full prompt + response after stream completes */
       const historyRes = await fetch("/api/history", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          prompt,
+          prompt: promptToSend,
           response: fullText,
           latencyMs: Date.now() - start,
           model: "gpt-4o-mini"
@@ -124,15 +158,14 @@ export default function Home() {
 
       const historyData = await historyRes.json();
 
-      /* if history save fails, we still keep response visible */
       if (!historyRes.ok) {
         console.error("HISTORY SAVE ERROR:", historyData);
       } else {
-        /* refresh history list so new item appears */
         await loadHistory();
       }
+
+      setResponse("");
     } catch (err: any) {
-      /* if user canceled, don't show an error */
       if (err?.name === "AbortError") {
         console.log("Streaming canceled by user");
       } else {
@@ -140,117 +173,130 @@ export default function Home() {
       }
     }
 
-    /* reset UI states */
     setController(null);
     setLoading(false);
   }
 
-  /* clear UI input + response + error (does not clear DynamoDB history) */
-  function handleClearUI() {
-    setPrompt("");
-    setResponse("");
-    setError("");
-  }
-
-  /* clear DynamoDB history */
+  /* clear Dynamo history (chat) */
   async function handleClearHistory() {
     try {
       await fetch("/api/history", { method: "DELETE" });
       await loadHistory();
+      setResponse("");
+      setError("");
     } catch (err) {
       console.error("CLEAR HISTORY ERROR:", err);
     }
   }
 
   return (
-    <main className="min-h-screen flex items-center justify-center bg-gray-100 p-6">
-      <div className="bg-white shadow-lg rounded-2xl p-6 w-full max-w-xl space-y-4">
-        <h1 className="text-2xl font-bold text-center">AI Prompt Tester</h1>
+    <main className="min-h-screen bg-gray-100">
+      {/* Chat container */}
+      <div className="mx-auto max-w-3xl h-screen flex flex-col">
+        {/* Header */}
+        <div className="p-4 flex items-center justify-between">
+          <h1 className="text-xl font-bold">AI Chat</h1>
 
-        {/* prompt input */}
-        <textarea
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          placeholder="Ask anything..."
-          className="w-full border rounded-lg p-3 resize-none h-32"
-        />
-
-        {/* action buttons */}
-        <div className="flex gap-2">
-          {/* submit */}
           <button
-            onClick={handleSubmit}
-            disabled={loading}
-            className="flex-1 bg-black text-white py-2 rounded-lg disabled:opacity-50"
+            onClick={handleClearHistory}
+            className="text-sm underline"
+            type="button"
           >
-            {loading ? "Generating..." : "Submit"}
-          </button>
-
-          {/* stop shows only while generating */}
-          {loading && controller && (
-            <button
-              onClick={() => controller.abort()}
-              className="px-4 border border-red-500 text-red-500 rounded-lg"
-              type="button"
-            >
-              Stop
-            </button>
-          )}
-
-          {/* clear UI */}
-          <button onClick={handleClearUI} className="px-4 border rounded-lg">
-            Clear
+            Clear chat
           </button>
         </div>
 
-        {/* error */}
-        {error && <p className="text-red-500 text-sm">{error}</p>}
-
-        {/* response */}
-        {response && (
-          <div className="border rounded-lg p-3 bg-gray-50 whitespace-pre-wrap">
-            {response}
-          </div>
-        )}
-
-        {/* history section */}
-        <div className="pt-2">
-          <div className="flex items-center justify-between">
-            <h2 className="font-semibold">History</h2>
-
-            <button
-              onClick={handleClearHistory}
-              className="text-sm underline"
-              type="button"
-            >
-              Clear history
-            </button>
-          </div>
-
+        {/* Messages area (scrollable) */}
+        <div className="flex-1 overflow-y-auto px-4 pb-28 mask-gradient">
           {historyLoading ? (
-            <p className="text-sm text-gray-500">Loading history...</p>
-          ) : history.length === 0 ? (
-            <p className="text-sm text-gray-500">No history yet.</p>
+            <p className="text-sm text-gray-500">Loading chat...</p>
+          ) : chatMessages.length === 0 && !loading ? (
+            <div className="mt-10 text-center text-gray-500">
+              <p className="text-lg font-medium">Start a conversation</p>
+              <p className="text-sm">Ask anything and your chat will be saved.</p>
+            </div>
           ) : (
-            <ul className="mt-2 space-y-2">
-              {history.map((h) => (
-                <li key={h.sk} className="border rounded-lg p-3 bg-gray-50">
-                  <p className="text-xs text-gray-500">
-                    {new Date(h.createdAt).toLocaleString()}
-                    {h.latencyMs ? ` • ${h.latencyMs}ms` : ""}
-                  </p>
-
-                  <p className="text-sm font-medium mt-2">Prompt:</p>
-                  <p className="text-sm text-gray-700">{h.prompt}</p>
-
-                  <p className="text-sm font-medium mt-2">Response:</p>
-                  <p className="text-sm text-gray-700 whitespace-pre-wrap">
-                    {h.response}
-                  </p>
-                </li>
+            <div className="space-y-3 pb-10 pt-10">
+              {chatMessages.map((m) => (
+                <div
+                  key={m.id}
+                  className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
+                >
+                  <div
+                    className={`max-w-[85%] rounded-2xl px-4 py-3 shadow-sm whitespace-pre-wrap ${
+                      m.role === "user"
+                        ? "bg-black text-white"
+                        : "bg-white text-gray-900"
+                    }`}
+                  >
+                    {m.text}
+                    {m.role === "assistant" && m.latencyMs ? (
+                      <div className="mt-2 text-xs opacity-60">
+                        {m.latencyMs}ms
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
               ))}
-            </ul>
+
+              {/* Live streaming message bubble (assistant) */}
+              {loading && (
+                <div className="flex justify-start">
+                  <div className="max-w-[85%] rounded-2xl px-4 py-3 shadow-sm bg-white text-gray-900 whitespace-pre-wrap">
+                    {response || "Thinking..."}
+                  </div>
+                </div>
+              )}
+
+              {/* any error */}
+              {error && (
+                <div className="flex justify-start">
+                  <div className="max-w-[85%] rounded-2xl px-4 py-3 bg-red-50 text-red-700 border border-red-200">
+                    {error}
+                  </div>
+                </div>
+              )}
+
+              <div ref={bottomRef} />
+            </div>
           )}
+        </div>
+
+        {/* Input area (fixed at bottom) */}
+        <div className="fixed bottom-0 left-0 right-0 bg-gray-100 border-t">
+          <div className="mx-auto max-w-3xl p-4">
+            <div className="bg-white rounded-2xl shadow-md p-3 flex gap-2 items-end">
+              <textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                placeholder="Message..."
+                className="flex-1 border rounded-xl p-3 resize-none h-14 focus:outline-none"
+              />
+
+              <button
+                onClick={handleSubmit}
+                disabled={loading}
+                className="bg-black text-white px-4 py-3 rounded-xl disabled:opacity-50"
+                type="button"
+              >
+                {loading ? "..." : "Send"}
+              </button>
+
+              {loading && controller && (
+                <button
+                  onClick={() => controller.abort()}
+                  className="border border-red-500 text-red-500 px-4 py-3 rounded-xl"
+                  type="button"
+                >
+                  Stop
+                </button>
+              )}
+            </div>
+
+            <p className="mt-2 text-xs text-gray-500">
+              Tip: Your chats are saved to DynamoDB automatically.
+            </p>
+          </div>
         </div>
       </div>
     </main>

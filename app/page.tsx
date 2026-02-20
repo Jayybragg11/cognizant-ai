@@ -340,7 +340,7 @@ export default function Home() {
       <div className="h-screen flex w-full">
         {/* Sidebar */}
         <aside className="w-80 bg-[var(--cog-surface)] border-r border-[var(--cog-border)] hidden md:flex flex-col">
-          <div className="p-4 flex items-center justify-between border-b border-[var(--cog-border)]">
+          <div className="p-4 flex items-center justify-between border-[var(--cog-border)]">
             <h2 className="font-semibold tracking-tight">Chats</h2>
 
             <button
